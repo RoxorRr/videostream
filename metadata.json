@@ -1,0 +1,6 @@
+{
+  "name": "PuckVision Pro - Hockey Video Editor & NAS Zoom Suite",
+  "description": "Professional hockey video review and editing workstation with Ugreen NAS integration, precision zoom, 4-way keyboard pan, frame stepping, and zero-distraction fullscreen review.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
