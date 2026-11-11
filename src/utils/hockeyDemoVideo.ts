@@ -1,10 +1,10 @@
 /**
  * Generates dynamic high-definition hockey simulation video clips (60fps)
  * with authentic rink markings (blue lines, goal crease, faceoff circles, puck, skaters, scoreboard)
- * converted to a local Blob URL for instant video player testing.
+ * converted to local Blob URLs for instant seamless playlist testing.
  */
 
-export function generateHockeySampleClip(): Promise<string> {
+export function generateHockeySampleClip(period: number = 1, title: string = 'Period 1 Breakout'): Promise<string> {
   return new Promise((resolve) => {
     const canvas = document.createElement('canvas');
     canvas.width = 1280;
@@ -16,9 +16,7 @@ export function generateHockeySampleClip(): Promise<string> {
       return;
     }
 
-    // Check if MediaRecorder is supported
     if (typeof MediaRecorder === 'undefined' || !canvas.captureStream) {
-      // Fallback: create short loop
       resolve('');
       return;
     }
@@ -52,7 +50,8 @@ export function generateHockeySampleClip(): Promise<string> {
 
     mediaRecorder.start();
 
-    const totalFrames = 300; // 10 seconds at 30fps
+    // 8 seconds per clip at 30fps
+    const totalFrames = 240;
     let currentFrame = 0;
 
     function renderFrame() {
@@ -144,63 +143,46 @@ export function generateHockeySampleClip(): Promise<string> {
         ctx.arc(880, cy, 95, 0, Math.PI * 2);
         ctx.stroke();
 
-        // Face-off dot
         ctx.fillStyle = '#dc2626';
         ctx.beginPath();
         ctx.arc(880, cy, 10, 0, Math.PI * 2);
         ctx.fill();
       });
 
-      // Animated Skaters and Puck
-      // Skater 1: Puck Carrier (White & Navy)
-      // Skates in from neutral zone past blue line toward net
-      const skaterProgress = (t % 5) / 5; // 0 to 1 every 5s
-      const skaterX = 350 + skaterProgress * 650;
-      const skaterY = 320 + Math.sin(t * 4) * 80;
+      // Animated Skaters and Puck with period-specific variations
+      const skaterProgress = (t % 4) / 4;
+      const speedMult = period === 1 ? 1 : period === 2 ? 1.25 : 1.4;
+      const skaterX = 300 + skaterProgress * 700;
+      const skaterY = 320 + Math.sin(t * (3 + period)) * (60 + period * 15);
 
-      // Skater 2: Defender (Red)
-      const defX = 750 + Math.sin(t * 2) * 80;
-      const defY = 350 + Math.cos(t * 3) * 110;
+      const defX = 750 + Math.sin(t * 2) * 90;
+      const defY = 350 + Math.cos(t * (2.5 + period * 0.5)) * 120;
 
-      // Goalie (in crease)
       const goalieX = 1080;
-      const goalieY = 360 + Math.sin(t * 4) * 35;
+      const goalieY = 360 + Math.sin(t * 4.5) * 40;
 
       // Draw Goalie
-      ctx.fillStyle = '#0f172a'; // Goalie pads
+      ctx.fillStyle = '#0f172a';
       ctx.beginPath();
       ctx.arc(goalieX, goalieY, 18, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = '#e11d48'; // Goalie jersey
+      ctx.fillStyle = period === 3 ? '#e11d48' : '#059669';
       ctx.beginPath();
       ctx.arc(goalieX - 5, goalieY, 12, 0, Math.PI * 2);
       ctx.fill();
-      // Goalie stick
-      ctx.strokeStyle = '#f59e0b';
-      ctx.lineWidth = 4;
-      ctx.beginPath();
-      ctx.moveTo(goalieX - 12, goalieY + 12);
-      ctx.lineTo(goalieX - 25, goalieY + 6);
-      ctx.stroke();
 
       // Draw Defender
-      ctx.fillStyle = '#dc2626'; // Red jersey
+      ctx.fillStyle = '#dc2626';
       ctx.beginPath();
       ctx.arc(defX, defY, 16, 0, Math.PI * 2);
       ctx.fill();
-      // Stick
-      ctx.strokeStyle = '#1e293b';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(defX, defY);
-      ctx.lineTo(defX - 30, defY + Math.sin(t * 5) * 20);
-      ctx.stroke();
 
       // Draw Puck Carrier
-      ctx.fillStyle = '#0284c7'; // Navy/Cyan jersey
+      ctx.fillStyle = period === 2 ? '#7c3aed' : '#0284c7';
       ctx.beginPath();
       ctx.arc(skaterX, skaterY, 16, 0, Math.PI * 2);
       ctx.fill();
+
       // Stick
       const stickX = skaterX + 25;
       const stickY = skaterY + 15;
@@ -215,14 +197,13 @@ export function generateHockeySampleClip(): Promise<string> {
       let puckX = stickX + 6;
       let puckY = stickY + 2;
 
-      // Shot fired when skater reaches deep offensive zone
-      if (skaterProgress > 0.72) {
-        const shotPhase = (skaterProgress - 0.72) / 0.28;
+      if (skaterProgress > 0.7) {
+        const shotPhase = (skaterProgress - 0.7) / 0.3;
         puckX = stickX + shotPhase * (1110 - stickX);
         puckY = stickY + shotPhase * (355 - stickY);
       }
 
-      // Draw Puck (Hard black vulcanized rubber with slight shadow)
+      // Draw Puck
       ctx.fillStyle = 'rgba(0,0,0,0.3)';
       ctx.beginPath();
       ctx.ellipse(puckX + 2, puckY + 2, 7, 5, 0, 0, Math.PI * 2);
@@ -232,43 +213,35 @@ export function generateHockeySampleClip(): Promise<string> {
       ctx.ellipse(puckX, puckY, 6, 4.5, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      // Top Overlay: Authentic Broadcast Scoreboard + Frame Counter for Video Analysis
+      // Broadcast Scoreboard with Period Info
       ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-      ctx.fillRect(40, 10, 480, 32);
+      ctx.fillRect(40, 10, 520, 32);
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-      ctx.strokeRect(40, 10, 480, 32);
+      ctx.strokeRect(40, 10, 520, 32);
 
       ctx.font = '700 13px "Plus Jakarta Sans", sans-serif';
       ctx.fillStyle = '#f8fafc';
-      ctx.fillText('PERIOD 2', 55, 31);
+      ctx.fillText(`PERIOD ${period}`, 55, 31);
 
       ctx.fillStyle = '#38bdf8';
-      ctx.fillText('HAWKS 3', 145, 31);
+      ctx.fillText(`HAWKS ${period + 1}`, 155, 31);
 
       ctx.fillStyle = '#94a3b8';
-      ctx.fillText('—', 225, 31);
+      ctx.fillText('—', 245, 31);
 
       ctx.fillStyle = '#f87171';
-      ctx.fillText('BLUES 2', 255, 31);
+      ctx.fillText(`BLUES ${period}`, 275, 31);
 
       ctx.font = '500 12px "JetBrains Mono", monospace';
       ctx.fillStyle = '#e2e8f0';
-      const clockSecs = Math.max(0, 14 * 60 + 20 - Math.floor(t));
+      const clockSecs = Math.max(0, 18 * 60 - Math.floor(t));
       const mins = Math.floor(clockSecs / 60);
       const secs = (clockSecs % 60).toString().padStart(2, '0');
-      ctx.fillText(`14:${secs}`, 345, 31);
+      ctx.fillText(`${mins}:${secs}`, 365, 31);
 
-      // Live Frame Counter Stamp (essential for video editors analyzing exact frame)
-      const frameStr = `FRM #${currentFrame.toString().padStart(4, '0')} (${(t).toFixed(2)}s)`;
+      const frameStr = `FRM #${currentFrame.toString().padStart(4, '0')}`;
       ctx.fillStyle = '#fbbf24';
-      ctx.fillText(frameStr, 400, 31);
-
-      // Offside Blue Line Marker indicator on bottom
-      ctx.fillStyle = 'rgba(37, 99, 235, 0.85)';
-      ctx.fillRect(510, 685, 60, 20);
-      ctx.fillStyle = '#ffffff';
-      ctx.font = '700 10px "Plus Jakarta Sans", sans-serif';
-      ctx.fillText('BLUE LINE', 516, 699);
+      ctx.fillText(frameStr, 445, 31);
 
       currentFrame++;
       if (currentFrame < totalFrames) {

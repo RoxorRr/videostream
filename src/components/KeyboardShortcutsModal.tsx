@@ -28,6 +28,8 @@ export const KeyboardShortcutsModal: React.FC<KeyboardShortcutsModalProps> = ({
       items: [
         { key: 'F', desc: 'Toggle 100% Unobstructed Full-Screen Mode' },
         { key: 'Space', desc: 'Play / Pause video' },
+        { key: 'N  or  PageDown', desc: 'Next video in playlist (instant cut)' },
+        { key: 'P  or  PageUp', desc: 'Previous video in playlist' },
         { key: 'Esc', desc: 'Exit Full-Screen' },
         { key: '<  or  ,', desc: 'Previous frame (1/30s step back)' },
         { key: '>  or  .', desc: 'Next frame (1/30s step forward)' },

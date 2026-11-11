@@ -1,14 +1,14 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { ZoomPanState, DrawingElement } from '../types/hockey';
-import { RinkMinimap } from './RinkMinimap';
+import { VideoSource, ZoomPanState } from '../types/hockey';
 
 interface VideoPlayerCanvasProps {
-  videoUrl: string;
+  playlist: VideoSource[];
+  currentIndex: number;
+  onIndexChange: (newIndex: number) => void;
   isPlaying: boolean;
   onPlayStateChange: (playing: boolean) => void;
   onTimeUpdate: (time: number) => void;
   onDurationChange: (duration: number) => void;
-  seekTime: number | null;
   playbackRate: number;
   zoomPan: ZoomPanState;
   onZoomPanChange: (state: ZoomPanState) => void;
@@ -16,23 +16,17 @@ interface VideoPlayerCanvasProps {
   onFullscreenChange: (fullscreen: boolean) => void;
   isCleanMode: boolean;
   onToggleCleanMode: () => void;
-  showMinimap: boolean;
-  onToggleMinimap: () => void;
-  isTelestratorActive?: boolean;
-  activeColor?: string;
-  drawTool?: 'circle' | 'arrow' | 'freehand';
-  onSnapshotTriggered?: (trigger: () => void) => void;
-  onRecordTriggered?: (trigger: (recording: boolean) => void) => void;
-  onStepFrameTriggered?: (trigger: (frames: number) => void) => void;
+  loopPlaylist?: boolean;
 }
 
 export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
-  videoUrl,
+  playlist,
+  currentIndex,
+  onIndexChange,
   isPlaying,
   onPlayStateChange,
   onTimeUpdate,
   onDurationChange,
-  seekTime,
   playbackRate,
   zoomPan,
   onZoomPanChange,
@@ -40,27 +34,54 @@ export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
   onFullscreenChange,
   isCleanMode,
   onToggleCleanMode,
-  showMinimap,
-  onToggleMinimap,
-  isTelestratorActive = false,
-  activeColor = '#facc15',
-  drawTool = 'freehand',
-  onSnapshotTriggered,
-  onRecordTriggered,
-  onStepFrameTriggered,
+  loopPlaylist = true,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const drawingCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  // Dual-Deck Video Elements for 0ms delay gapless transition
+  const videoDeckARef = useRef<HTMLVideoElement>(null);
+  const videoDeckBRef = useRef<HTMLVideoElement>(null);
+
+  // Active deck currently visible and playing: 'A' or 'B'
+  const [activeDeck, setActiveDeck] = useState<'A' | 'B'>('A');
+
+  // Track what index each deck is holding
+  const deckAIndexRef = useRef<number>(currentIndex);
+  const deckBIndexRef = useRef<number>(-1);
+
+  // Dimensions & idle cursor
+  const [dimensions, setDimensions] = useState({ width: 1920, height: 1080 });
+  const [mouseIdle, setMouseIdle] = useState(false);
+  const mouseTimerRef = useRef<number | null>(null);
 
   // Dragging state for mouse pan
   const isDraggingRef = useRef(false);
   const dragStartRef = useRef({ x: 0, y: 0, initialPanX: 0, initialPanY: 0 });
 
-  // Dimensions
-  const [dimensions, setDimensions] = useState({ width: 1920, height: 1080 });
-  const [mouseIdle, setMouseIdle] = useState(false);
-  const mouseTimerRef = useRef<number | null>(null);
+  // Continuous zoom and pan keys
+  const keysDownRef = useRef<Set<string>>(new Set());
+  const zoomPanRef = useRef(zoomPan);
+  zoomPanRef.current = zoomPan;
+
+  // Next index helper
+  const getNextIndex = useCallback(
+    (idx: number) => {
+      if (playlist.length <= 1) return 0;
+      if (idx + 1 < playlist.length) return idx + 1;
+      return loopPlaylist ? 0 : idx;
+    },
+    [playlist.length, loopPlaylist]
+  );
+
+  // Prev index helper
+  const getPrevIndex = useCallback(
+    (idx: number) => {
+      if (playlist.length <= 1) return 0;
+      if (idx - 1 >= 0) return idx - 1;
+      return loopPlaylist ? playlist.length - 1 : 0;
+    },
+    [playlist.length, loopPlaylist]
+  );
 
   // Update container dimensions on resize
   useEffect(() => {
@@ -77,7 +98,7 @@ export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
     return () => window.removeEventListener('resize', updateSize);
   }, []);
 
-  // Listen for fullscreen change events from browser
+  // Listen for native fullscreen changes
   useEffect(() => {
     const handleFsChange = () => {
       const isFs = !!(
@@ -95,54 +116,132 @@ export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
     };
   }, [onFullscreenChange]);
 
-  // Video playback speed sync
+  // Synchronize playbackRate across both decks
   useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.playbackRate = playbackRate;
-    }
+    if (videoDeckARef.current) videoDeckARef.current.playbackRate = playbackRate;
+    if (videoDeckBRef.current) videoDeckBRef.current.playbackRate = playbackRate;
   }, [playbackRate]);
 
-  // Handle Play/Pause
+  // Play / Pause active deck
   useEffect(() => {
-    if (!videoRef.current) return;
+    const currentVideo = activeDeck === 'A' ? videoDeckARef.current : videoDeckBRef.current;
+    if (!currentVideo) return;
+
     if (isPlaying) {
-      videoRef.current.play().catch(() => {
+      currentVideo.play().catch(() => {
         onPlayStateChange(false);
       });
     } else {
-      videoRef.current.pause();
+      currentVideo.pause();
     }
-  }, [isPlaying, onPlayStateChange]);
+  }, [isPlaying, activeDeck, onPlayStateChange]);
 
-  // Handle external seek request
+  // PRIME / PRELOAD NEXT VIDEO IN STANDBY DECK
+  // When activeDeck or currentIndex changes, ensure the standby deck preloads the NEXT track
   useEffect(() => {
-    if (seekTime !== null && videoRef.current) {
-      videoRef.current.currentTime = seekTime;
-    }
-  }, [seekTime]);
+    if (playlist.length === 0) return;
 
-  // Frame stepping helper (~30 fps = ~0.0333s)
-  const stepFrame = useCallback(
-    (frames: number) => {
-      if (!videoRef.current) return;
-      videoRef.current.pause();
-      onPlayStateChange(false);
-      const frameDelta = (1 / 30) * frames;
-      videoRef.current.currentTime = Math.max(
-        0,
-        Math.min(videoRef.current.duration || 9999, videoRef.current.currentTime + frameDelta)
-      );
+    const nextIdx = getNextIndex(currentIndex);
+
+    if (activeDeck === 'A') {
+      // Deck A is active with currentIndex
+      deckAIndexRef.current = currentIndex;
+      if (videoDeckARef.current && videoDeckARef.current.src !== playlist[currentIndex]?.url) {
+        videoDeckARef.current.src = playlist[currentIndex]?.url || '';
+        if (isPlaying) videoDeckARef.current.play().catch(() => {});
+      }
+
+      // Preload next track into Deck B
+      if (playlist.length > 1 && playlist[nextIdx]) {
+        deckBIndexRef.current = nextIdx;
+        if (videoDeckBRef.current && videoDeckBRef.current.src !== playlist[nextIdx].url) {
+          videoDeckBRef.current.src = playlist[nextIdx].url;
+          videoDeckBRef.current.preload = 'auto';
+          videoDeckBRef.current.currentTime = 0;
+          videoDeckBRef.current.load();
+        }
+      }
+    } else {
+      // Deck B is active with currentIndex
+      deckBIndexRef.current = currentIndex;
+      if (videoDeckBRef.current && videoDeckBRef.current.src !== playlist[currentIndex]?.url) {
+        videoDeckBRef.current.src = playlist[currentIndex]?.url || '';
+        if (isPlaying) videoDeckBRef.current.play().catch(() => {});
+      }
+
+      // Preload next track into Deck A
+      if (playlist.length > 1 && playlist[nextIdx]) {
+        deckAIndexRef.current = nextIdx;
+        if (videoDeckARef.current && videoDeckARef.current.src !== playlist[nextIdx].url) {
+          videoDeckARef.current.src = playlist[nextIdx].url;
+          videoDeckARef.current.preload = 'auto';
+          videoDeckARef.current.currentTime = 0;
+          videoDeckARef.current.load();
+        }
+      }
+    }
+  }, [activeDeck, currentIndex, playlist, isPlaying, getNextIndex]);
+
+  // SEAMLESS INSTANT HANDOFF FROM ACTIVE DECK TO STANDBY DECK (0ms Delay)
+  const triggerSeamlessNext = useCallback(() => {
+    if (playlist.length <= 1) {
+      // Single video loop
+      const activeVideo = activeDeck === 'A' ? videoDeckARef.current : videoDeckBRef.current;
+      if (activeVideo) {
+        activeVideo.currentTime = 0;
+        activeVideo.play().catch(() => {});
+      }
+      return;
+    }
+
+    const nextIdx = getNextIndex(currentIndex);
+
+    if (activeDeck === 'A') {
+      const videoB = videoDeckBRef.current;
+      if (videoB) {
+        // Start standby deck B immediately
+        videoB.play().then(() => {
+          // Switch visible active deck with 0ms transition
+          setActiveDeck('B');
+          onIndexChange(nextIdx);
+        }).catch(() => {
+          setActiveDeck('B');
+          onIndexChange(nextIdx);
+        });
+      }
+    } else {
+      const videoA = videoDeckARef.current;
+      if (videoA) {
+        // Start standby deck A immediately
+        videoA.play().then(() => {
+          // Switch visible active deck with 0ms transition
+          setActiveDeck('A');
+          onIndexChange(nextIdx);
+        }).catch(() => {
+          setActiveDeck('A');
+          onIndexChange(nextIdx);
+        });
+      }
+    }
+  }, [activeDeck, currentIndex, getNextIndex, onIndexChange, playlist.length]);
+
+  // Jump immediately to specific index
+  const jumpToIndex = useCallback(
+    (targetIdx: number) => {
+      if (targetIdx < 0 || targetIdx >= playlist.length) return;
+      onIndexChange(targetIdx);
+
+      const activeVideo = activeDeck === 'A' ? videoDeckARef.current : videoDeckBRef.current;
+      if (activeVideo && playlist[targetIdx]) {
+        activeVideo.src = playlist[targetIdx].url;
+        activeVideo.currentTime = 0;
+        if (isPlaying) activeVideo.play().catch(() => {});
+      }
     },
-    [onPlayStateChange]
+    [activeDeck, isPlaying, onIndexChange, playlist]
   );
 
-  useEffect(() => {
-    if (onStepFrameTriggered) {
-      onStepFrameTriggered(stepFrame);
-    }
-  }, [onStepFrameTriggered, stepFrame]);
-
-  // Clamping helper for pan coordinates so video remains visible within frame
+  // Clamping helper for pan coordinates
   const clampPan = useCallback(
     (panX: number, panY: number, scale: number) => {
       if (scale <= 1) return { x: 0, y: 0 };
@@ -156,11 +255,7 @@ export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
     [dimensions]
   );
 
-  // Continuous keyboard panning & continuous zooming loop via requestAnimationFrame
-  const keysDownRef = useRef<Set<string>>(new Set());
-  const zoomPanRef = useRef(zoomPan);
-  zoomPanRef.current = zoomPan;
-
+  // Smooth continuous pan and zoom loop
   useEffect(() => {
     let animId: number;
 
@@ -175,15 +270,14 @@ export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
         const isShift = keys.has('Shift') || keys.has('ShiftLeft') || keys.has('ShiftRight');
         const isAlt = keys.has('Alt') || keys.has('AltLeft') || keys.has('AltRight');
 
-        // Continuous zoom with Key A (Zoom In) or Key S (Zoom Out)
-        // Holding A zooms in smoothly
+        // Continuous zoom with Key A (Zoom In)
         if (keys.has('KeyA') || keys.has('Equal') || keys.has('NumpadAdd')) {
-          scale = Math.min(10, scale + 0.02 * (isShift ? 2.5 : 1));
+          scale = Math.min(10, scale + 0.025 * (isShift ? 2.5 : 1));
           changed = true;
         }
-        // Holding S zooms out smoothly
+        // Continuous zoom with Key S (Zoom Out)
         if (keys.has('KeyS') || keys.has('Minus') || keys.has('NumpadSubtract')) {
-          scale = Math.max(1, scale - 0.02 * (isShift ? 2.5 : 1));
+          scale = Math.max(1, scale - 0.025 * (isShift ? 2.5 : 1));
           changed = true;
         }
 
@@ -231,10 +325,9 @@ export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
     return () => cancelAnimationFrame(animId);
   }, [clampPan, onZoomPanChange]);
 
-  // Global Keydown & Keyup listener for instant discrete taps and shortcuts
+  // Global Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore if user is typing in an input
       if (
         document.activeElement?.tagName === 'INPUT' ||
         document.activeElement?.tagName === 'TEXTAREA'
@@ -246,12 +339,12 @@ export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
       if (e.key === 'Shift') keysDownRef.current.add('Shift');
       if (e.key === 'Alt') keysDownRef.current.add('Alt');
 
-      // Prevent scrolling or unwanted default actions on arrows / space
+      // Prevent scroll on arrow keys / space
       if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) {
         e.preventDefault();
       }
 
-      // Discrete tap for Key A: Zoom In
+      // Key A: Tap to zoom in
       if (e.code === 'KeyA') {
         e.preventDefault();
         const nextScale = Math.min(10, zoomPanRef.current.scale + 0.35);
@@ -259,7 +352,7 @@ export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
         onZoomPanChange({ ...zoomPanRef.current, scale: nextScale, panX: clamped.x, panY: clamped.y });
       }
 
-      // Discrete tap for Key S: Zoom Out
+      // Key S: Tap to zoom out
       else if (e.code === 'KeyS') {
         e.preventDefault();
         const nextScale = Math.max(1, zoomPanRef.current.scale - 0.35);
@@ -267,19 +360,19 @@ export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
         onZoomPanChange({ ...zoomPanRef.current, scale: nextScale, panX: clamped.x, panY: clamped.y });
       }
 
-      // Reset Zoom & Pan: Key R or 0
+      // Key R or 0: Reset zoom to 100% Fit
       else if (e.code === 'KeyR' || e.key === '0' || e.code === 'Numpad0') {
         e.preventDefault();
         onZoomPanChange({ ...zoomPanRef.current, scale: 1, panX: 0, panY: 0 });
       }
 
-      // Play / Pause: Space
+      // Space: Play / Pause
       else if (e.code === 'Space') {
         e.preventDefault();
         onPlayStateChange(!isPlaying);
       }
 
-      // Fullscreen toggle: Key F or Enter
+      // Key F: Fullscreen Toggle
       else if (e.code === 'KeyF' || (e.code === 'Enter' && e.altKey)) {
         e.preventDefault();
         if (!containerRef.current) return;
@@ -290,25 +383,36 @@ export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
         }
       }
 
-      // Frame stepping: < , or > .
+      // Key N or PageDown: Next video in playlist
+      else if (e.code === 'KeyN' || e.code === 'PageDown') {
+        e.preventDefault();
+        triggerSeamlessNext();
+      }
+
+      // Key P or PageUp: Previous video in playlist
+      else if (e.code === 'KeyP' || e.code === 'PageUp') {
+        e.preventDefault();
+        const prevIdx = getPrevIndex(currentIndex);
+        jumpToIndex(prevIdx);
+      }
+
+      // Frame stepping (< or , and > or .)
       else if (e.key === '<' || e.key === ',') {
         e.preventDefault();
-        stepFrame(-1);
+        const activeVideo = activeDeck === 'A' ? videoDeckARef.current : videoDeckBRef.current;
+        if (activeVideo) {
+          activeVideo.pause();
+          onPlayStateChange(false);
+          activeVideo.currentTime = Math.max(0, activeVideo.currentTime - 1 / 30);
+        }
       } else if (e.key === '>' || e.key === '.') {
         e.preventDefault();
-        stepFrame(1);
-      }
-
-      // Zero UI toggle: Key H
-      else if (e.code === 'KeyH') {
-        e.preventDefault();
-        onToggleCleanMode();
-      }
-
-      // Minimap toggle: Key M (only when not in strict fullscreen)
-      else if (e.code === 'KeyM') {
-        e.preventDefault();
-        onToggleMinimap();
+        const activeVideo = activeDeck === 'A' ? videoDeckARef.current : videoDeckBRef.current;
+        if (activeVideo) {
+          activeVideo.pause();
+          onPlayStateChange(false);
+          activeVideo.currentTime = Math.min(activeVideo.duration || 9999, activeVideo.currentTime + 1 / 30);
+        }
       }
     };
 
@@ -325,13 +429,15 @@ export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
       window.removeEventListener('keyup', handleKeyUp);
     };
   }, [
+    activeDeck,
     clampPan,
+    currentIndex,
+    getPrevIndex,
     isPlaying,
+    jumpToIndex,
     onPlayStateChange,
-    onToggleCleanMode,
-    onToggleMinimap,
     onZoomPanChange,
-    stepFrame,
+    triggerSeamlessNext,
   ]);
 
   // Mouse wheel zoom
@@ -373,7 +479,6 @@ export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    // Hide cursor after 2s of inactivity
     setMouseIdle(false);
     if (mouseTimerRef.current) clearTimeout(mouseTimerRef.current);
     mouseTimerRef.current = window.setTimeout(() => {
@@ -400,7 +505,6 @@ export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
     isDraggingRef.current = false;
   };
 
-  // Double click on video to toggle fullscreen
   const handleDoubleClick = () => {
     if (!containerRef.current) return;
     if (!document.fullscreenElement) {
@@ -410,8 +514,7 @@ export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
     }
   };
 
-  // Completely unobstructed:
-  // When in fullscreen or clean mode, hide cursor and show ZERO overlay elements!
+  // In fullscreen or clean mode: ZERO UI obstruction
   const isCompletelyUnobstructed = isFullscreen || isCleanMode;
   const cursorClass = isCompletelyUnobstructed && mouseIdle
     ? 'cursor-none'
@@ -430,7 +533,7 @@ export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
       className={`relative w-full h-full bg-black overflow-hidden flex items-center justify-center select-none ${cursorClass}`}
       style={{ touchAction: 'none', backgroundColor: '#000000' }}
     >
-      {/* Video element with hardware-accelerated transform */}
+      {/* Both decks share the identical hardware-accelerated transform */}
       <div
         className="w-full h-full flex items-center justify-center transition-transform duration-75 ease-out will-change-transform"
         style={{
@@ -438,38 +541,80 @@ export const VideoPlayerCanvas: React.FC<VideoPlayerCanvasProps> = ({
           transformOrigin: 'center center',
         }}
       >
+        {/* DECK A */}
         <video
-          ref={videoRef}
-          src={videoUrl}
+          ref={videoDeckARef}
           playsInline
-          loop
           crossOrigin="anonymous"
-          className="w-full h-full object-contain pointer-events-none"
+          preload="auto"
+          className="absolute max-w-full max-h-full object-contain pointer-events-none"
           style={{
+            opacity: activeDeck === 'A' ? 1 : 0,
+            zIndex: activeDeck === 'A' ? 2 : 1,
             imageRendering: 'auto',
             filter: 'none',
           }}
           onTimeUpdate={() => {
-            if (videoRef.current) onTimeUpdate(videoRef.current.currentTime);
+            if (activeDeck === 'A' && videoDeckARef.current) {
+              onTimeUpdate(videoDeckARef.current.currentTime);
+              // Pre-trigger transition at the very last frame to eliminate any frame stall
+              if (
+                videoDeckARef.current.duration > 0 &&
+                videoDeckARef.current.currentTime >= videoDeckARef.current.duration - 0.04
+              ) {
+                triggerSeamlessNext();
+              }
+            }
           }}
           onLoadedMetadata={() => {
-            if (videoRef.current) onDurationChange(videoRef.current.duration);
+            if (activeDeck === 'A' && videoDeckARef.current) {
+              onDurationChange(videoDeckARef.current.duration);
+            }
           }}
-          onEnded={() => onPlayStateChange(false)}
+          onEnded={() => {
+            if (activeDeck === 'A') {
+              triggerSeamlessNext();
+            }
+          }}
+        />
+
+        {/* DECK B (Standby / Gapless Ping-Pong Partner) */}
+        <video
+          ref={videoDeckBRef}
+          playsInline
+          crossOrigin="anonymous"
+          preload="auto"
+          className="absolute max-w-full max-h-full object-contain pointer-events-none"
+          style={{
+            opacity: activeDeck === 'B' ? 1 : 0,
+            zIndex: activeDeck === 'B' ? 2 : 1,
+            imageRendering: 'auto',
+            filter: 'none',
+          }}
+          onTimeUpdate={() => {
+            if (activeDeck === 'B' && videoDeckBRef.current) {
+              onTimeUpdate(videoDeckBRef.current.currentTime);
+              // Pre-trigger transition at the very last frame
+              if (
+                videoDeckBRef.current.duration > 0 &&
+                videoDeckBRef.current.currentTime >= videoDeckBRef.current.duration - 0.04
+              ) {
+                triggerSeamlessNext();
+              }
+            }
+          }}
+          onLoadedMetadata={() => {
+            if (activeDeck === 'B' && videoDeckBRef.current) {
+              onDurationChange(videoDeckBRef.current.duration);
+            }
+          }}
+          onEnded={() => {
+            if (activeDeck === 'B') {
+              triggerSeamlessNext();
+            }
+          }}
         />
       </div>
-
-      {/* Rink Radar Minimap (ONLY shown when NOT in fullscreen/clean mode and enabled) */}
-      {!isCompletelyUnobstructed && showMinimap && (
-        <RinkMinimap
-          scale={zoomPan.scale}
-          panX={zoomPan.panX}
-          panY={zoomPan.panY}
-          containerWidth={dimensions.width}
-          containerHeight={dimensions.height}
-          visible={showMinimap}
-        />
-      )}
 
       {/* Note: In Fullscreen or Clean Mode, absolutely ZERO elements are rendered on top of the video */}
     </div>
